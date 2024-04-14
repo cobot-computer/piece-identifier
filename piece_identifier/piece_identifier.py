@@ -8,11 +8,13 @@ from PIL import Image as PILImage
 import numpy as np
 import json
 from ultralytics import YOLO
-from PIL import Image, ImageDraw, ImageFont
+from PIL import ImageDraw, ImageFont
+from ament_index_python.packages import get_package_share_directory
+import os
 
 text_size = 8
 
-debug_mul = 4
+debug_mul = 1
 
 text_size *= debug_mul
 
@@ -22,7 +24,7 @@ def draw_bb(image, left, upper, right, lower, label):
     draw = ImageDraw.Draw(image)
 
     # Draw the rectangle (bounding box)
-    draw.rectangle((left, upper, right, lower), outline="red", width=2)
+    draw.rectangle((left, upper, right, lower), outline="red", width=3)
 
     try:
         font = ImageFont.truetype("arial.ttf", text_size)
@@ -46,7 +48,8 @@ RESIZE_TO = (100, 100)
 class YOLOModel:
     def __init__(self, model_path):
         # Load the model
-        self.model = YOLO(model_path)
+        package_share_directory = get_package_share_directory('piece_identifier')
+        self.model = YOLO(os.path.join(package_share_directory, model_path))
 
     def predict(self, img):
         # Inference
@@ -54,7 +57,7 @@ class YOLOModel:
 
         return results
 
-    def crop_and_run(self, image: Image):
+    def crop_and_run(self, image: PILImage):
         width, height = image.size
         crop_x = int(width * B_PERCENT)
         crop_y = int(height * B_PERCENT)
@@ -145,6 +148,7 @@ class PieceIdentifier(Node):
         self.br = CvBridge()
 
     def listener_callback(self, data):
+        print("callback")
         # Convert ROS Image message to OpenCV image
         current_frame = self.br.imgmsg_to_cv2(data)
 
@@ -157,13 +161,12 @@ class PieceIdentifier(Node):
         # Convert Pillow image back to OpenCV image
         processed_image = np.array(preview_image)
 
-        # Ensure it's in the correct format (mono8 for grayscale)
-        processed_image = processed_image[:, :, np.newaxis]
-
         # Convert back to ROS Image message and publish
-        self.image_publisher.publish(self.br.cv2_to_imgmsg(processed_image, "mono8"))
+        self.image_publisher.publish(self.br.cv2_to_imgmsg(processed_image, "bgr8"))
 
-        self.matrix_publisher.publish(str(inference_matrix))
+        str_msg = String()
+        str_msg.data = str(inference_matrix)
+        self.matrix_publisher.publish(str_msg)
 
 
 def main(args=None):
