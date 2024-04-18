@@ -1,4 +1,5 @@
 import rclpy
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -6,167 +7,92 @@ from std_msgs.msg import String
 import cv2
 from PIL import Image as PILImage
 import numpy as np
-import json
-from ultralytics import YOLO
-from PIL import ImageDraw, ImageFont
-from ament_index_python.packages import get_package_share_directory
-import os
+from yolomodel import YOLOModel
+from chess_msgs.msg import FullFEN, GameConfig, ClockButtons
+import chess
 
-text_size = 8
-
-debug_mul = 1
-
-text_size *= debug_mul
+WHITE = 0
+BLACK = 1
 
 
-def draw_bb(image, left, upper, right, lower, label):
-    # Create a drawing context
-    draw = ImageDraw.Draw(image)
+def get_piece_name(board, x, y):
+    # Convert x and y (1-based index) into a square index (0-based index)
+    square = chess.square(7 - y, 7 - x)
 
-    # Draw the rectangle (bounding box)
-    draw.rectangle((left, upper, right, lower), outline="red", width=3)
+    # Get the piece at the given square
+    piece = board.piece_at(square)
 
-    try:
-        font = ImageFont.truetype("arial.ttf", text_size)
-    except IOError:
-        font = ImageFont.load_default()
+    if piece:
+        # Determine the yor of the piece
+        color = "white" if piece.color == chess.WHITE else "black"
 
-    # Position for the label. This example positions it above the bounding box.
-    label_pos = (left, upper - text_size - 2)
+        # Determine the type of the piece
+        piece_type = {
+            chess.PAWN: "pawn",
+            chess.KNIGHT: "knight",
+            chess.BISHOP: "bishop",
+            chess.ROOK: "rook",
+            chess.QUEEN: "queen",
+            chess.KING: "king",
+        }.get(piece.piece_type, "Unknown")
 
-    # Draw the label
-    draw.text(label_pos, label, fill="cyan", font=font)
-
-    return image
-
-
-B_PERCENT = 22 / 377
-
-RESIZE_TO = (100, 100)
+        return f"{piece_type}-{color}"
+    else:
+        return "empty"
 
 
-class YOLOModel:
-    def __init__(self, model_path):
-        # Load the model
-        package_share_directory = get_package_share_directory('piece_identifier')
-        self.model = YOLO(os.path.join(package_share_directory, model_path))
+def check_probability(board, inference_matrix):
+    final_prob = 1
 
-    def predict(self, img):
-        # Inference
-        results = self.model(img, verbose=False)
+    for y in range(8):
+        for x in range(8):
+            board_label = get_piece_name(board, x, y)
 
-        return results
+            final_prob *= inference_matrix[y][x][board_label]
 
-    def crop_and_run(self, image: PILImage):
-        width, height = image.size
-        crop_x = int(width * B_PERCENT)
-        crop_y = int(height * B_PERCENT)
-        crop_width = int(width - (2 * B_PERCENT * width))
-        crop_height = int(height - (2 * B_PERCENT * height))
-        checkerboard_img = image.crop((crop_x, crop_y, crop_x + crop_width, crop_y + crop_height))
-
-        checkerboard_width, checkerboard_height = checkerboard_img.size
-
-        # Calculate the size of each cell
-        cell_width = checkerboard_width / 8
-        cell_height = checkerboard_height / 8
-
-        output_matrix = []
-        images = []
-
-        # Iterate over each row and column
-        for row in range(8):
-            for col in range(8):
-                # Calculate the left, upper, right, and lower coordinates for each cell
-                left = round(col * cell_width)
-                upper = round(row * cell_height)
-                right = round(left + cell_width)
-                lower = round(upper + cell_height)
-                crop_box = (left, upper, right, lower)
-
-                # Crop the cell from the image
-                cell_image = checkerboard_img.crop(crop_box)
-
-                cell_image = cell_image.resize(RESIZE_TO)
-
-                images.append(cell_image)
-
-        results = self.predict(images)
-
-        draw_img = image.copy().resize((image.size[0] * debug_mul, image.size[1] * debug_mul))
-
-        offset_x = round(B_PERCENT * draw_img.size[0])
-        offset_y = round(B_PERCENT * draw_img.size[1])
-
-        cell_width *= debug_mul
-        cell_height *= debug_mul
-        # Iterate over each row and column
-        index = 0
-        for row in range(8):
-            row_classifications = [].copy()
-            for col in range(8):
-                left = round(col * cell_width) + offset_x
-                upper = round(row * cell_height) + offset_y
-                right = round(left + cell_width)
-                lower = round(upper + cell_height)
-
-                classifications = results[index]
-                index += 1
-
-                names = classifications.names
-                probs = classifications.probs.data
-
-                actual_names = []
-                for key in range(13):
-                    actual_names.append(names[key])
-
-                confidence_scores = {}
-                for label, confidence in zip(actual_names, probs):
-                    confidence_scores[label] = float(confidence)
-
-                row_classifications.append(confidence_scores)
-
-                label = sorted(confidence_scores, key=confidence_scores.get)[-1]
-
-                draw_img = draw_bb(draw_img, left, upper, right, lower, label)
-            output_matrix.append(row_classifications)
-
-        return draw_img, output_matrix
+    return final_prob
 
 
 class PieceIdentifier(Node):
     def __init__(self):
         super().__init__("piece_identifier")
+        
+        self.declare_parameter(
+            "initial_game_state",
+            chess.STARTING_FEN,
+            ParameterDescriptor(description="FEN string describing the initial game state"),
+        )
+
         self.model = YOLOModel("cobot_best.pt")
-        self.subscription = self.create_subscription(
-            Image, "/chessboard/image_raw", self.listener_callback, 10
-        )
-        self.image_publisher = self.create_publisher(Image, "/chessboard/annotated/image_raw", 10)
-        self.matrix_publisher = self.create_publisher(
-            String, "/chessboard/piece_identifier/inference_results", 10
-        )
         self.br = CvBridge()
 
-    def listener_callback(self, data):
-        print("callback")
-        # Convert ROS Image message to OpenCV image
-        current_frame = self.br.imgmsg_to_cv2(data)
+        self.last_img = None
+        self.last_depth_img = None
+        self.board = chess.Board(self.get_parameter('initial_game_state').value)
 
-        # Convert OpenCV image to Pillow Image
-        pil_image = PILImage.fromarray(cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB))
+        # Subscriptions
+        self.board_img_sub = self.create_subscription(
+            Image, "chessboard/image_raw", self.board_img_cb, 10
+        )
+        self.depth_img_sub = self.create_subscription(
+            Image, "kinect2/depth/image_raw", self.color_img_cb, 10
+        )
+        self.restart_game_sub = self.create_subscription(
+            GameConfig, "chess/restart_game", self.restart_game_cb, 10
+        )
+        self.clock_btn_sub = self.create_subscription(ClockButtons, "chess/clock_buttons", 10)
 
-        # Send to yolo model
-        preview_image, inference_matrix = self.model.crop_and_run(pil_image)
+        # Publishers
+        self.game_state_pub = self.create_publisher(
+            FullFEN,
+            "chess/game_state",
+            10,
+        )
+        self.image_publisher = self.create_publisher(Image, "/chessboard/annotated/image_raw", 10)
 
-        # Convert Pillow image back to OpenCV image
-        processed_image = np.array(preview_image)
+        self.game_state_pub.publish(FullFEN(fen=self.board.fen()))
 
-        # Convert back to ROS Image message and publish
-        self.image_publisher.publish(self.br.cv2_to_imgmsg(processed_image, "bgr8"))
-
-        str_msg = String()
-        str_msg.data = str(inference_matrix)
-        self.matrix_publisher.publish(str_msg)
+    def 
 
 
 def main(args=None):
