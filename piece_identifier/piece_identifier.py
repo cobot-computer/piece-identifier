@@ -74,13 +74,13 @@ class PieceIdentifier(Node):
         self.board_img_sub = self.create_subscription(
             Image, "chessboard/image_raw", self.board_img_cb, 10
         )
-        self.depth_img_sub = self.create_subscription(
-            Image, "kinect2/depth/image_raw", self.color_img_cb, 10
-        )
+        # self.depth_img_sub = self.create_subscription(
+        #     Image, "kinect2/depth/image_raw", self.color_img_cb, 10
+        # )
         self.restart_game_sub = self.create_subscription(
             GameConfig, "chess/restart_game", self.restart_game_cb, 10
         )
-        self.clock_btn_sub = self.create_subscription(ClockButtons, "chess/clock_buttons", 10)
+        self.clock_btn_sub = self.create_subscription(ClockButtons, "chess/clock_buttons", self.clock_button, 10)
 
         # Publishers
         self.game_state_pub = self.create_publisher(
@@ -91,8 +91,61 @@ class PieceIdentifier(Node):
         self.image_publisher = self.create_publisher(Image, "/chessboard/annotated/image_raw", 10)
 
         self.game_state_pub.publish(FullFEN(fen=self.board.fen()))
+    
+        self.my_turn = False
+    
+    def restart_game(self, _):
+        self.board = chess.Board(self.get_parameter('initial_game_state').value)
 
-    def 
+    def clock_button(self, _):
+        self.my_turn = True
+
+    def process_image(self, data):
+        # if not self.my_turn:
+        #     # Wait
+        #     return
+        print("callback")
+        # Convert ROS Image message to OpenCV image
+        current_frame = self.br.imgmsg_to_cv2(data)
+
+        # Convert OpenCV image to Pillow Image
+        pil_image = PILImage.fromarray(cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB))
+
+        # Send to yolo model
+        preview_image, inference_matrix = self.model.crop_and_run(pil_image)
+
+        # Convert Pillow image back to OpenCV image
+        processed_image = np.array(preview_image)
+
+        # Convert back to ROS Image message and publish
+        self.image_publisher.publish(self.br.cv2_to_imgmsg(processed_image, "bgr8"))
+
+        # str_msg = String()
+        # str_msg.data = str(inference_matrix)
+        # self.matrix_publisher.publish(str_msg)
+
+        if not self.my_turn:
+            # Preview image is fine for now, we don't need to progress further. 
+            return
+        
+        # Alright now we need to use the inference matrix to guess at the next state of the board.
+        possible_boards = [] # Keeps track of a tuple containing (probability, and board)
+
+        for move in self._board.legal_moves:
+            new_board = self._board.copy()
+
+            new_board.push(move)
+
+            probability = check_probability(new_board, inference_matrix)
+
+            possible_boards.append((probability, new_board))
+        
+        max_tuple = max(possible_boards, key=lambda x: x[0])
+
+        self.board = max_tuple[1]
+
+        self.game_state_pub.publish(FullFEN(fen=self.board.fen()))
+
 
 
 def main(args=None):
