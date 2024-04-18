@@ -7,7 +7,7 @@ from std_msgs.msg import String
 import cv2
 from PIL import Image as PILImage
 import numpy as np
-from yolomodel import YOLOModel
+from .yolomodel import YOLOModel
 from chess_msgs.msg import FullFEN, GameConfig, ClockButtons
 import chess
 
@@ -80,7 +80,7 @@ class PieceIdentifier(Node):
         self.restart_game_sub = self.create_subscription(
             GameConfig, "chess/restart_game", self.restart_game_cb, 10
         )
-        self.clock_btn_sub = self.create_subscription(ClockButtons, "chess/clock_buttons", self.clock_button, 10)
+        self.clock_btn_sub = self.create_subscription(ClockButtons, "chess/clock_buttons", self.clock_button_cb, 10)
 
         # Publishers
         self.game_state_pub = self.create_publisher(
@@ -94,13 +94,13 @@ class PieceIdentifier(Node):
     
         self.my_turn = False
     
-    def restart_game(self, _):
+    def restart_game_cb(self, _):
         self.board = chess.Board(self.get_parameter('initial_game_state').value)
 
-    def clock_button(self, _):
+    def clock_button_cb(self, _):
         self.my_turn = True
 
-    def process_image(self, data):
+    def board_img_cb(self, data):
         # if not self.my_turn:
         #     # Wait
         #     return
